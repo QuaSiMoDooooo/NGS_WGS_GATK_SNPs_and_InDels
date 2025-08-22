@@ -1,0 +1,222 @@
+# 加载配置文件
+configfile: "config.yaml"
+
+# 样本列表
+SAMPLES = [line.strip() for line in open(config["sample_list"])]
+
+# 定义最终输出
+rule all:
+    input:
+        # 所有样本的 HaplotypeCaller 生成的 GVCF 文件，确保 {sample} 被展开
+        expand(f"{config['output_dir']}/07_haplotypecaller_gvcf_result/{{sample}}.g.vcf.gz", sample=SAMPLES),
+        # 两次质控html
+        expand(f"{config['output_dir']}/01_fastqc_result/{{sample}}_1_fastqc.html", sample=SAMPLES),
+        expand(f"{config['output_dir']}/03_fastqc_result/{{sample}}_1_fastqc.html", sample=SAMPLES),
+        # 最终合并的 SNP 和 INDEL 文件
+        f"{config['output_dir']}/11_SelectVariants_result/all_samples.snp.vcf.gz",
+        f"{config['output_dir']}/11_SelectVariants_result/all_samples.indel.vcf.gz"
+
+# 1. FastQC 初步质量控制
+rule fastqc_raw:
+    input:
+        fq1=f"{config['input_dir']}/{{sample}}_1.fastq.gz",
+        fq2=f"{config['input_dir']}/{{sample}}_2.fastq.gz"
+    output:
+        f"{config['output_dir']}/01_fastqc_result/{{sample}}_1_fastqc.html",
+        f"{config['output_dir']}/01_fastqc_result/{{sample}}_2_fastqc.html"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/fastqc_raw/{{sample}}.txt"
+    shell:
+        """
+        fastqc -t {config[threads]} -o {config[output_dir]}/01_fastqc_result {input.fq1}
+        fastqc -t {config[threads]} -o {config[output_dir]}/01_fastqc_result {input.fq2}
+        """
+        
+
+# 2. Trim Galore 进行质量修剪
+rule trim_galore:
+    input:
+        fq1=f"{config['input_dir']}/{{sample}}_1.fastq.gz",
+        fq2=f"{config['input_dir']}/{{sample}}_2.fastq.gz"
+    output:
+        f"{config['output_dir']}/02_trim_galore_result/{{sample}}_1_val_1.fq.gz",
+        f"{config['output_dir']}/02_trim_galore_result/{{sample}}_2_val_2.fq.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/trim_galore/{{sample}}.txt"
+    shell:
+        "trim_galore --paired -o {config[output_dir]}/02_trim_galore_result {input.fq1} {input.fq2}"
+
+# 3. FastQC 进行修剪后数据的质量控制
+rule fastqc_trimmed:
+    input:
+        fq1=f"{config['output_dir']}/02_trim_galore_result/{{sample}}_1_val_1.fq.gz",
+        fq2=f"{config['output_dir']}/02_trim_galore_result/{{sample}}_2_val_2.fq.gz"
+    output:
+        f"{config['output_dir']}/03_fastqc_result/{{sample}}_1_fastqc.html",
+        f"{config['output_dir']}/03_fastqc_result/{{sample}}_2_fastqc.html"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/fastqc_trimmed/{{sample}}.txt"
+    shell:
+        """
+        fastqc -t {config[threads]} -o {config[output_dir]}/03_fastqc_result {input.fq1}
+        fastqc -t {config[threads]} -o {config[output_dir]}/03_fastqc_result {input.fq2}
+        """
+
+# 4. BWA 比对及 MarkDuplicates 去重
+rule bwa_markduplicates:
+    input:
+        fq1=f"{config['output_dir']}/02_trim_galore_result/{{sample}}_1_val_1.fq.gz",
+        fq2=f"{config['output_dir']}/02_trim_galore_result/{{sample}}_2_val_2.fq.gz",
+        ref=config["reference"]
+    output:
+        bam=f"{config['output_dir']}/05_bwa_MarkDuplicates_result/{{sample}}.markdup.bam"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/bwa_markduplicates/{{sample}}.txt"
+    params:
+        read_group=lambda wildcards: f"@RG\\tID:{wildcards.sample}_id\\tPL:illumina\\tSM:{wildcards.sample}"
+    shell:
+        """
+        # 运行 BWA 比对，并进行排序
+        bwa mem -t {config[threads]} -R '{params.read_group}' {input.ref} {input.fq1} {input.fq2} | \
+        samtools sort -@ {config[threads]} -o {config[output_dir]}/04_bwa_result/{{wildcards.sample}}.bam
+
+        # 生成比对统计信息
+        samtools flagstat -@ {config[threads]} {config[output_dir]}/04_bwa_result/{{wildcards.sample}}.bam > {config[output_dir]}/04_bwa_result/{{wildcards.sample}}.stats
+
+        # MarkDuplicates 去重
+        gatk MarkDuplicates -I {config[output_dir]}/04_bwa_result/{{wildcards.sample}}.bam -O {output.bam} \
+        -M {config[output_dir]}/05_bwa_MarkDuplicates_result/{{wildcards.sample}}_metrics.txt \
+	    --CREATE_INDEX true \
+	    --REMOVE_DUPLICATES true
+        """
+
+# 5. BQSR 基础质量重校准
+rule bqsr:
+    input:
+        bam=f"{config['output_dir']}/05_bwa_MarkDuplicates_result/{{sample}}.markdup.bam",
+        ref=config["reference"],
+        dbsnp=config["resources"]["dbsnp"],
+        mills=config["resources"]["mills"],
+        phase1_1000G=config["resources"]["phase1_1000G"]
+    output:
+        recal_bam=f"{config['output_dir']}/06_BQSR_result/{{sample}}.bqsr.bam"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/bqsr/{{sample}}.txt"
+    shell:
+        """
+        gatk BaseRecalibrator -I {input.bam} -R {input.ref} --known-sites {input.dbsnp} --known-sites {input.mills} --known-sites {input.phase1_1000G} \
+        -O {config[output_dir]}/06_BQSR_result/{{wildcards.sample}}.recal.table && \
+        gatk ApplyBQSR -R {input.ref} -I {input.bam} --bqsr-recal-file {config[output_dir]}/06_BQSR_result/{{wildcards.sample}}.recal.table \
+        -O {output.recal_bam}
+        """
+
+# 6. HaplotypeCaller 生成 GVCF 文件
+rule haplotypecaller:
+    input:
+        bam=f"{config['output_dir']}/06_BQSR_result/{{sample}}.bqsr.bam",
+        ref=config["reference"]
+    output:
+        gvcf=f"{config['output_dir']}/07_haplotypecaller_gvcf_result/{{sample}}.g.vcf.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/haplotypecaller/{{sample}}.txt"
+    shell:
+        """
+        gatk HaplotypeCaller -R {input.ref} -I {input.bam} --emit-ref-confidence GVCF \
+        -O {output.gvcf}
+        """
+
+# 7. CombineGVCFs 合并 GVCF 文件
+rule combine_gvcfs:
+    input:
+        gvcfs=expand(f"{config['output_dir']}/07_haplotypecaller_gvcf_result/{{sample}}.g.vcf.gz", sample=SAMPLES),
+        ref=config["reference"]
+    output:
+        combined_gvcf=f"{config['output_dir']}/08_CombineGVCFs_result/combined.g.vcf.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/combine_gvcfs.txt"
+    params:
+        gvcf_files=lambda wildcards: " ".join(f"-V {gvcf}" for gvcf in expand(f"{config['output_dir']}/07_haplotypecaller_gvcf_result/{{sample}}.g.vcf.gz", sample=SAMPLES))
+    shell:
+        """
+        gatk CombineGVCFs -R {input.ref} {params.gvcf_files} -O {output.combined_gvcf}
+        """
+
+# 8. GenotypeGVCFs 进行联合基因分型
+rule genotype_gvcfs:
+    input:
+        combined_gvcf=f"{config['output_dir']}/08_CombineGVCFs_result/combined.g.vcf.gz",
+        ref=config["reference"]
+    output:
+        vcf=f"{config['output_dir']}/09_GenotypeGVCFs_result/genotyped.vcf.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/genotype_gvcfs.txt"
+    shell:
+        """
+        gatk GenotypeGVCFs -R {input.ref} -V {input.combined_gvcf} -O {output.vcf}
+        """
+
+# 9. VQSR 变异质量校准
+rule vqsr:
+    input:
+        vcf=f"{config['output_dir']}/09_GenotypeGVCFs_result/genotyped.vcf.gz",
+        ref=config["reference"],
+        hapmap=config["resources"]["hapmap"],
+        omni=config["resources"]["omni"],
+        phase1_1000G=config["resources"]["phase1_1000G"],
+        dbsnp=config["resources"]["dbsnp"],
+        mills=config["resources"]["mills"]
+    output:
+        recal_vcf=f"{config['output_dir']}/10_VQSR_result/all_samples_recalibrated.vcf.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/vqsr.txt"
+    shell:
+        """
+        # SNP 变异质量校准
+        gatk VariantRecalibrator -R {input.ref} -V {input.vcf} \
+        -resource:hapmap,known=false,training=true,truth=true,prior=15.0 {input.hapmap} \
+        -resource:omni,known=false,training=true,truth=false,prior=12.0 {input.omni} \
+        -resource:1000G,known=false,training=true,truth=false,prior=10.0 {input.phase1_1000G} \
+        -resource:dbsnp,known=true,training=false,truth=false,prior=2.0 {input.dbsnp} \
+        -an DP -an QD -an FS -an SOR -an ReadPosRankSum -an MQRankSum -mode SNP \
+        -tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 95.0 -tranche 90.0 \
+        --rscript-file {config[output_dir]}/10_VQSR_result/all_samples.HC.snps.plots.R" \
+        --tranches-file {config[output_dir]}/10_VQSR_result/all_samples.HC.snps.tranches" \
+        -O {config[output_dir]}/10_VQSR_result/all_samples_SNP.recal
+
+        gatk ApplyVQSR -R {input.ref} -V {input.vcf} --ts-filter-level 99.0 \
+        --tranches-file {config[output_dir]}/10_VQSR_result/all_samples.HC.snps.tranches --recal-file {config[output_dir]}/10_VQSR_result/all_samples_SNP.recal \
+        -mode SNP -O {config[output_dir]}/10_VQSR_result/all_samples.HC.snp.vqsr.vcf.gz
+
+
+        # INDEL 变异质量校准
+        gatk VariantRecalibrator -R {input.ref} -V {config[output_dir]}/10_VQSR_result/all_samples.HC.snp.vqsr.vcf.gz \
+            -resource:mills,known=true,training=true,truth=true,prior=12.0 {input.mills} \
+            -resource:dbsnp,known=true,training=false,truth=false,prior=2.0 {input.dbsnp} \
+            -an DP -an QD -an FS -an SOR -an ReadPosRankSum -an MQRankSum \
+            -mode INDEL \
+            --max-gaussians 6 \
+            --rscript-file {config[output_dir]}/10_VQSR_result/all_samples.HC.indels.plots.R \
+            --tranches-file {config[output_dir]}/10_VQSR_result/all_samples.HC.indels.tranches \
+            -O {config[output_dir]}/10_VQSR_result/all_samples_INDEL.recal 
+
+        gatk ApplyVQSR -R {input.ref} -V {config[output_dir]}/10_VQSR_result/all_samples.HC.snp.vqsr.vcf.gz \
+            --ts-filter-level 99.0 \
+            --tranches-file {config[output_dir]}/10_VQSR_result/all_samples.HC.indels.tranches \
+            --recal-file {config[output_dir]}/10_VQSR_result/all_samples_INDEL.recal  \
+            -mode INDEL -O {output.recal_vcf}
+        """
+
+# 10. SelectVariants 提取 SNP 和 INDEL
+rule select_variants:
+    input:
+        recal_vcf=f"{config['output_dir']}/10_VQSR_result/all_samples_recalibrated.vcf.gz"
+    output:
+        snp_vcf=f"{config['output_dir']}/11_SelectVariants_result/all_samples.snp.vcf.gz",
+        indel_vcf=f"{config['output_dir']}/11_SelectVariants_result/all_samples.indel.vcf.gz"
+    benchmark:
+        f"{config['output_dir']}/benchmarks/select_variants/all_samples.txt"
+    shell:
+        """
+        gatk SelectVariants -select-type SNP -V {input.recal_vcf} -O {output.snp_vcf} && \
+        gatk SelectVariants -select-type INDEL -V {input.recal_vcf} -O {output.indel_vcf}
+        """

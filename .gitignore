@@ -1,0 +1,120 @@
+# WGS重测序SNP鉴定项目 - Git忽略文件
+
+# 结果目录 - 忽略所有中间结果
+01_single_test/*_result/
+02_batch_pipeline/results/
+
+# 临时文件和缓存
+*.tmp
+*.temp
+*.log
+*.out
+*.err
+
+# Snakemake相关
+.snakemake/
+.snakemake/log/
+.snakemake/locks/
+.snakemake/incomplete/
+.snakemake/metadata/
+.snakemake/shadow/
+.snakemake/conda/
+.snakemake/conda-archive/
+.snakemake/auxiliary/
+.snakemake/singularity/
+
+# 质控报告文件（保留HTML报告，忽略压缩包）
+*_fastqc.zip
+*_fastqc/
+*trimming_report.txt
+
+# 中间BAM文件
+*.bam
+*.bai
+*.sam
+
+# GVCF中间文件
+*.g.vcf
+*.g.vcf.idx
+
+# VCF中间文件
+*.vcf
+*.vcf.idx
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.csi
+
+# 校准相关文件
+*.table
+*.recal
+*.tranches
+*.plots.R
+*.plots.R.pdf
+
+# 统计文件
+*.stats
+*.metrics
+*.csv
+
+# 日志和输出文件
+nohup.out
+*.o[0-9]*
+*.e[0-9]*
+*.po*
+*.pe*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.iml
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Conda环境
+.conda/
+.conda-env/
+
+# 备份文件
+*.bak
+*.backup
+*.old
+
+# 大文件和压缩包
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.fa
+*.fa.gz
+*.fasta
+*.fasta.gz
+
+# 参考基因组（通常较大，建议单独管理）
+*.fasta
+*.fasta.fai
+*.dict
+*.amb
+*.ann
+*.bwt
+*.pac
+*.sa
+
+# 保留重要文件
+!README.md
+!LICENSE
+!*.sh
+!*.py
+!Snakefile
+!config.yaml
+!sample_list.txt
+!pipeline.pdf
